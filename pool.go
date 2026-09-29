@@ -1,8 +1,10 @@
 // Package energy 是体力池：按时间回复、消耗与上限。
-// 缺陷：直接采信客户端时间（回拨会倒扣体力）、上限没有截断、跨天重置没做。
 package energy
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // ErrEnergy 表示体力不足。
 var ErrEnergy = errors.New("energy: 体力不足")
@@ -15,12 +17,38 @@ type Pool struct {
 	UpdatedAt  int64
 }
 
-// Regen 按 now 回复体力。缺陷：now 比 UpdatedAt 小时按负数分钟倒扣，且不截断上限。
+// Regen 按服务器时间 now 结算体力回复。
+// 回拨不受理：now 早于 UpdatedAt 时按 UpdatedAt 结算，体力不变也不倒扣；
+// 服务器日期跨天时体力重置到 Max（客户端时间不参与判断）；
+// 结算后体力截断到 [0, Max]，UpdatedAt 单调不减，重复结算幂等。
 func (p *Pool) Regen(now int64) int {
-	minutes := (now - p.UpdatedAt) / 60
-	p.Energy += int(minutes) * p.RatePerMin
-	p.UpdatedAt = now
+	effective := now
+	if effective < p.UpdatedAt {
+		effective = p.UpdatedAt
+	}
+	if dayChanged(p.UpdatedAt, effective) {
+		p.Energy = p.Max
+	} else {
+		minutes := (effective - p.UpdatedAt) / 60
+		p.Energy += int(minutes) * p.RatePerMin
+	}
+	if p.Energy > p.Max {
+		p.Energy = p.Max
+	}
+	if p.Energy < 0 {
+		p.Energy = 0
+	}
+	p.UpdatedAt = effective
 	return p.Energy
+}
+
+// dayChanged 判断两个服务器时间戳（UTC）是否跨天。
+func dayChanged(a, b int64) bool {
+	ta := time.Unix(a, 0).UTC()
+	tb := time.Unix(b, 0).UTC()
+	ya, ma, da := ta.Date()
+	yb, mb, db := tb.Date()
+	return ya != yb || ma != mb || da != db
 }
 
 // Spend 消耗体力。
